@@ -1,192 +1,229 @@
-/*
-Version info:
-v6: maintenance build:
- 	 	 consolidated all move functions into one "doStep" function - removed moveCW and moveCCW functions
- 	 	 consolidated all button checks into buttonCheck function
- 	 	 rewrote comments and explanations
- 	 	 renamed msDelay as usDelay (as it is micro-seconds, not milliseconds - confusing legacy variable)
- 	 	 added fancy new project title/header
-v5: added switch case for step mode (full, 1/2 1/4 etc)
-v4: added potentiometer to control speed (msDelay) with an exponential function to map pot values to msDelay
-v3: added checkPot function - checks the position of the potentiometer and adjusts msDelay accordingly to speed up or slow down movement of the stepper motor
- */
-
-
 #include "Arduino.h"
+//define pin numbers
+byte DIR_PIN = 2;
+byte STEP_PIN = 3;
 
+//ms pins define step resolution:
+byte MS1_PIN = 8;       //      lo   hi   lo   hi   hi
+byte MS2_PIN = 7;       //      lo   lo   hi   hi   hi
+byte MS3_PIN = 6;       //      lo   lo   lo   lo   hi
+//Step =Full 1/2  1/4  1/8  1/16
 
-								//define pin numbers
-								//ms pins define step resolution:
-const int ms1Pin = 8;    	 	//      lo   hi   lo   hi   hi
-const int ms2Pin = 7;     	    //      lo   lo   hi   hi   hi
-const int ms3Pin = 6;          //      lo   lo   lo   lo   hi
-							    //Step =Full 1/2  1/4  1/8  1/16
+byte LIM_0_PIN = A1;   //limit switch pins 1 = switch farthest from motor, 0 = closest to motor
+byte LIM_1_PIN = A2;
 
-const int stepPin = 3;   		//pin to send step pulse to a4988
-const int dirPin = 2;      		//direction, high = clockwise low=anticlockwise (?)
+byte SLP_PIN = 4;     //sleep pin, low = sleep
+byte RST_PIN = 5;     //reset pin, pulse low to reset
 
-const int cwPin = 10;        	//clockwise button
-const int ccwPin = 11;       	//anticlockwise button
-const int limitPin = 10;      	//limit switch
-const int enablePin = 9;		//high signal turns off driver chip
-const int uStepPin = 12;			//microstep button
+byte EN_PIN = 9;      //enable pin, high to disable, low to enable driver
 
+//pins for buttons/switches
+byte MOVE_1_PIN = 11; //direction buttons 1 = away from motor, 0 = towards motor
+byte MOVE_0_PIN = 10;
+byte CO_FI_PIN = 12;   //coarse/fine switch
+byte FR_ST_PIN = 13;   //free move/step switch
 
-//define variables
-int usDelay = 500000;            	//microsecond delay for pulse length
-int BScwPin = 0;            	//button states for buttons
-int BSccwPin = 0;
-int BSlimitPin = 0;
-int BSuStepPin = 0;
-bool clockWise;      	 	 	//direction of stepper rotation
-int uStep = 0;					//variable for switch case
-int numSteps = 0;				//count of total steps from one limit switch to the next
+int PULSE_LENGTH = 500;   //length of pulse sent to stepper driver
+int PULSE_GAP = 500;   //gap between pulses sent to stepper driver
+int SINGLE_STEP_DELAY = 200; //delay between teps fro single step mode
+
+bool DIR = 0;     // stage movement direction, 1 = away from motor, 0 = towards motor
+
+bool LIM_0 = digitalRead(LIM_0_PIN);     //button states
+bool LIM_1 = digitalRead(LIM_1_PIN);
+bool MOVE_0;
+bool MOVE_1;
+bool CO_FI = digitalRead(CO_FI_PIN);
+bool FR_ST;
+
+String SERIAL_DIR = "";
+int SERIAL_DIR_INT;
+String SERIAL_DIST = "";
+int SERIAL_DIST_INT;
+String SERIAL_OPS = "";
+int SERIAL_OPS_INT;
+char RX_BYTE = 0;
+String RX_STR = "";
 
 void setup() {
 
-	Serial.begin(9600);					//begin serial comms
+  pinMode(SLP_PIN, OUTPUT);   //sleep pin high to disable sleep mode
+  digitalWrite(SLP_PIN, HIGH);
 
-	pinMode(stepPin,OUTPUT);            //set pin types
-	pinMode(dirPin,OUTPUT);
-	pinMode(ms1Pin,OUTPUT);
-	pinMode(ms2Pin,OUTPUT);
-	pinMode(ms3Pin,OUTPUT);
-	pinMode(enablePin, OUTPUT);
+  pinMode(EN_PIN, OUTPUT);    //enable stepper driver
+  digitalWrite(EN_PIN, LOW);
 
-	pinMode(cwPin,INPUT);
-	pinMode(ccwPin,INPUT);
-	pinMode(limitPin,INPUT);
-	pinMode(uStepPin, INPUT);
+  pinMode(RST_PIN, OUTPUT);     //pulse reset pin to ensure driver reset
+  digitalWrite(RST_PIN, LOW);
+  delay(50);
+  digitalWrite(RST_PIN, HIGH);
+  delay(50);
 
+  pinMode(MS1_PIN, OUTPUT);   //microstep pins set to full stepping to begin
+  pinMode(MS2_PIN, OUTPUT);
+  pinMode(MS3_PIN, OUTPUT);
+  digitalWrite(MS1_PIN, LOW);
+  digitalWrite(MS2_PIN, LOW);
+  digitalWrite(MS3_PIN, LOW);
 
-	digitalWrite(ms1Pin,LOW);      	//set initial values
-	digitalWrite(ms2Pin,LOW);
-	digitalWrite(ms3Pin,LOW);
-	digitalWrite(enablePin,LOW);
-	digitalWrite(dirPin,HIGH);
+  pinMode(DIR_PIN, OUTPUT);
+  pinMode(STEP_PIN, OUTPUT);
 
-	calibrate();
+  pinMode(LIM_0_PIN, INPUT);
+  pinMode(LIM_1_PIN, INPUT);
+
+  Serial.begin(9600);
 }
 
-void loop() {
-	buttonCheck();
+void coarse_fine() {      //switch between coarse and fine movement
+  delay(200);
+  switch (CO_FI) {
+    case 0:             //full step (1)
+      digitalWrite(MS1_PIN, LOW);
+      digitalWrite(MS2_PIN, LOW);
+      digitalWrite(MS3_PIN, LOW);
+      break;
+
+    case 1:             //sixteenth step (1/16)
+      digitalWrite(MS1_PIN, HIGH);
+      digitalWrite(MS2_PIN, HIGH);
+      digitalWrite(MS3_PIN, HIGH);
+      break;
+  }
 }
 
-void doStep() {                     //main stepping function
+void stop_retract() {   //stop the motor and retract the stage far enough that the limit switch opens
 
-	digitalWrite(stepPin,HIGH);
-	delay(5);
-	digitalWrite(stepPin,LOW);
-	delay(5);
+  if (LIM_0) DIR = 1;
+  if (LIM_1) DIR = 0;
 
+  while (LIM_0 || LIM_1) {
+
+    digitalWrite(DIR_PIN, DIR);
+    digitalWrite(STEP_PIN, HIGH);
+    delayMicroseconds(PULSE_LENGTH);
+    digitalWrite(STEP_PIN, LOW);
+    delayMicroseconds(PULSE_GAP);
+    LIM_0 = digitalRead(LIM_0_PIN);
+    LIM_1 = digitalRead(LIM_1_PIN);
+  }
+  do_numsteps(50); //debounce switch
 }
 
-void changeDir(int dir) {                     //dir 0 = clockwise, dir 1 = anticlockwise
-	if (dir == 0)
-	{
-		digitalWrite(dirPin,HIGH);
-	}
-	else {
-		digitalWrite(dirPin,LOW);
-	}
-}
+void do_1step() {     //send a single pulse to the stepper motor
 
-void buttonCheck() {
-
-	BScwPin = digitalRead(cwPin);			//check clockwise pin, if high change direction clockwise, begin moving
-	if (BScwPin == HIGH) {
-		changeDir(0);
-		doStep();
-	}
-
-	BSccwPin = digitalRead(ccwPin);			//check counter-clockwise pin, if high change direction clockwise, begin moving
-	if (BSccwPin == HIGH) {
-		changeDir(1);
-		doStep();
-	}
-
-	BSlimitPin = digitalRead(limitPin);		//check limit pin, if high disable motors
-	if (BSlimitPin == HIGH) {
-		digitalWrite(enablePin, HIGH);
-	}
-	else {
-		digitalWrite(enablePin, LOW);
-	}
-
-	microSteps();							//run microSteps function to check microSteps button
-
-}
-
-void microSteps() {
-
-	BSuStepPin = digitalRead(uStepPin);		//check micro step button
-	if (BSuStepPin == HIGH) {				//if high switch case to next micro-step
-		++uStep;
-		delay(300);							//debounce button
-		if (uStep == 5) {
-			uStep = 0;
-		}
-	}
-
-	switch (uStep) {
-
-	case 0:							//full step (1)
-		digitalWrite(ms1Pin, LOW);
-		digitalWrite(ms2Pin, LOW);
-		digitalWrite(ms3Pin, LOW);
-		break;
-
-	case 1:							//half step (1/2)
-		digitalWrite(ms1Pin, HIGH);
-		digitalWrite(ms2Pin, LOW);
-		digitalWrite(ms3Pin, LOW);
-		break;
-
-	case 2:							//quarter step (1/4)
-		digitalWrite(ms1Pin, LOW);
-		digitalWrite(ms2Pin, HIGH);
-		digitalWrite(ms3Pin, LOW);
-		break;
-
-	case 3:							//eighth step (1/8)
-		digitalWrite(ms1Pin, HIGH);
-		digitalWrite(ms2Pin, HIGH);
-		digitalWrite(ms3Pin, LOW);
-		break;
-
-	case 4:							//sixteenth step (1/16)
-		digitalWrite(ms1Pin, HIGH);
-		digitalWrite(ms2Pin, HIGH);
-		digitalWrite(ms3Pin, HIGH);
-		break;
-
-	}
+  digitalWrite(DIR_PIN, DIR);
+  digitalWrite(STEP_PIN, HIGH);
+  delayMicroseconds(PULSE_LENGTH);
+  digitalWrite(STEP_PIN, LOW);
+  delayMicroseconds(PULSE_GAP);
 
 }
 
-void calibrate() {								//function to calibrate linear stage
+void do_numsteps(int num_steps) {	//subroutine to move a set number of steps
 
-	while (BSlimitPin == LOW) {					//move to one limit of the rail at full speed
-		BSlimitPin = digitalRead(limitPin);
-		doStep();
-	}
+  digitalWrite(DIR_PIN, DIR);
+  int i;
+  for (i = 0; i < num_steps; i++) {
 
-	delay(1000);								//debounce switch
-	BSlimitPin = LOW;							//reset button state of limit pin
-	changeDir(1);
-	while (BSlimitPin == LOW) {					//move to the other end of the rail, counting the number of steps on the way
-		BSlimitPin = digitalRead(limitPin);
-		numSteps++;
-		doStep();
-	}
-	serialDebug();
+    digitalWrite(STEP_PIN, HIGH);
+    delayMicroseconds(PULSE_LENGTH);
+    digitalWrite(STEP_PIN, LOW);
+    delayMicroseconds(PULSE_GAP);
+  }
 }
 
-void serialDebug() {					//function to output data to serial monitor for debugging
-	Serial.println("===============================");
-	Serial.print("    usDelay = ");
-	Serial.println(usDelay);
-	Serial.print("    numSteps = ");
-	Serial.println(numSteps);
-	Serial.println("===============================");
+void button_check() {		//check button states for input
+
+  LIM_0 = digitalRead(LIM_0_PIN);
+  LIM_1 = digitalRead(LIM_1_PIN);
+  if (LIM_0 || LIM_1) stop_retract();
+
+  FR_ST = digitalRead(FR_ST_PIN);
+
+  MOVE_0 = digitalRead(MOVE_1_PIN);
+  MOVE_1 = digitalRead(MOVE_0_PIN);
+
+
+  if (MOVE_0 && !MOVE_1) {
+    DIR = 1;
+    do_1step();
+    if (FR_ST) delay(SINGLE_STEP_DELAY);
+  }
+
+  if (MOVE_1 && !MOVE_0) {
+    DIR = 0;
+    do_1step();
+    if (FR_ST) delay(SINGLE_STEP_DELAY);
+  }
+
+  if
+  (digitalRead(CO_FI_PIN) != CO_FI) {
+    CO_FI = digitalRead(CO_FI_PIN);
+    coarse_fine();
+  }
 }
+
+void serial_check() {		//check whether serial characters are available
+  if (Serial.available() > 0) {    // is a character available?
+    RX_BYTE = Serial.read();       // get the character
+
+    if (RX_BYTE != 'E') {
+      // a character of the string was received
+      RX_STR += RX_BYTE;
+    } else {
+      // end of string
+
+      Serial.print("STRING IS: ");
+      Serial.println(RX_STR);
+
+
+
+      SERIAL_DIST = RX_STR.substring(1, 9);
+      Serial.print("DISTANCE IS: ");
+      Serial.println(SERIAL_DIST.toInt());
+      SERIAL_DIST_INT = SERIAL_DIST.toInt();
+      SERIAL_DIST = "";
+
+      SERIAL_OPS = RX_STR.substring(9, 13);
+      Serial.print("# OF OPERATIONS IS: ");
+      Serial.println(SERIAL_OPS.toInt());
+      SERIAL_OPS_INT = SERIAL_OPS.toInt();
+      SERIAL_OPS = "";
+
+      SERIAL_DIR = RX_STR.substring(0, 1);
+      Serial.print("DIR IS: ");
+      Serial.println(SERIAL_DIR);
+      SERIAL_DIR_INT = SERIAL_DIR.toInt();
+      SERIAL_DIR = "";
+
+      RX_STR = "";                // clear the string for reuse
+      Serial.println("");
+      Serial.println("ENTER STRING FOLLOWED BY 'E' TERMINATOR");
+      //   digitalWrite(DIR_PIN, SERIAL_DIR_INT);
+
+      int i;
+      int j;
+      for (j = 0; j < SERIAL_OPS_INT; j++) {
+        delay(1000);
+        Serial.print("OPERATION #");
+        Serial.println(j);
+        for (i = 0; i < SERIAL_DIST_INT; i++) {
+          digitalWrite(DIR_PIN, SERIAL_DIR_INT);
+          digitalWrite(STEP_PIN, HIGH);
+          delayMicroseconds(PULSE_LENGTH);
+          digitalWrite(STEP_PIN, LOW);
+          delayMicroseconds(PULSE_GAP);
+        }//000000100003E
+        //000000100008E
+      }
+
+    }
+
+  } // end: if (Serial.available() > 0)
+}
+
+void loop() {		//main loop
+  button_check();
+  serial_check();
+} 
