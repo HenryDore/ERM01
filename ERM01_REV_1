@@ -1,0 +1,261 @@
+#include "Arduino.h"
+//define pin numbers
+byte DIR_PIN = 2;
+byte STEP_PIN = 3;
+
+//ms pins define step resolution:
+byte MS1_PIN = 8;       //      lo   hi   lo   hi   hi
+byte MS2_PIN = 7;       //      lo   lo   hi   hi   hi
+byte MS3_PIN = 6;       //      lo   lo   lo   lo   hi
+//Step =Full 1/2  1/4  1/8  1/16
+
+byte LIM_0_PIN = A1;   //limit switch pins 1 = switch farthest from motor, 0 = closest to motor
+byte LIM_1_PIN = A2;
+
+byte SLP_PIN = 4;     //sleep pin, low = sleep
+byte RST_PIN = 5;     //reset pin, pulse low to reset
+
+byte EN_PIN = 9;      //enable pin, high to disable, low to enable driver
+
+//pins for buttons/switches
+byte MOVE_1_PIN = 11; //direction buttons 1 = away from motor, 0 = towards motor
+byte MOVE_0_PIN = 10;
+byte CO_FI_PIN = 12;   //coarse/fine switch
+byte FR_ST_PIN = 13;   //free move/step switch
+
+int PULSE_LENGTH = 500;   //length of pulse sent to stepper driver
+int PULSE_GAP = 500;   //gap between pulses sent to stepper driver
+int SINGLE_STEP_DELAY = 500; //delay between teps fro single step mode
+
+float STAGE_POSITION = 0;
+int STEP_MULTIPLIER = 1;
+
+bool DIR = 0;     // stage movement direction, 1 = away from motor, 0 = towards motor
+
+bool LIM_0 = digitalRead(LIM_0_PIN);     //button states
+bool LIM_1 = digitalRead(LIM_1_PIN);
+bool MOVE_0;
+bool MOVE_1;
+bool CO_FI = digitalRead(CO_FI_PIN);
+bool FR_ST;
+
+String SERIAL_DIR = "";
+int SERIAL_DIR_INT;
+String SERIAL_DIST = "";
+int SERIAL_DIST_INT;
+String SERIAL_OPS = "";
+int SERIAL_OPS_INT;
+char RX_BYTE = 0;
+String RX_STR = "";
+
+unsigned long StartTime = millis();          //timekeeping for serial write every second
+unsigned long CurrentTime = millis();
+unsigned long ElapsedTime = CurrentTime - StartTime;
+
+void setup() {
+
+  pinMode(SLP_PIN, OUTPUT);   //sleep pin high to disable sleep mode
+  digitalWrite(SLP_PIN, LOW);
+
+  pinMode(EN_PIN, OUTPUT);    //enable stepper driver
+  digitalWrite(EN_PIN, LOW);
+
+  pinMode(RST_PIN, OUTPUT);     //pulse reset pin to ensure driver reset
+  digitalWrite(RST_PIN, LOW);
+  delay(50);
+  digitalWrite(RST_PIN, HIGH);
+  delay(50);
+
+  pinMode(MS1_PIN, OUTPUT);   //microstep pins set to full stepping to begin
+  pinMode(MS2_PIN, OUTPUT);
+  pinMode(MS3_PIN, OUTPUT);
+  digitalWrite(MS1_PIN, LOW);
+  digitalWrite(MS2_PIN, LOW);
+  digitalWrite(MS3_PIN, LOW);
+
+  pinMode(DIR_PIN, OUTPUT);
+  pinMode(STEP_PIN, OUTPUT);
+
+  pinMode(LIM_0_PIN, INPUT);
+  pinMode(LIM_1_PIN, INPUT);
+
+  CO_FI = digitalRead(CO_FI_PIN);
+  coarse_fine(); 
+  FR_ST = digitalRead(FR_ST_PIN);
+
+
+  Serial.begin(9600);
+}
+
+void coarse_fine() {      //switch between coarse and fine movement
+  delay(200);
+  switch (CO_FI) {
+    case 0:             //full step (1)
+      digitalWrite(MS1_PIN, LOW);
+      digitalWrite(MS2_PIN, LOW);
+      digitalWrite(MS3_PIN, LOW);
+      STEP_MULTIPLIER = 16;
+      break;
+
+    case 1:             //sixteenth step (1/16)
+      digitalWrite(MS1_PIN, HIGH);
+      digitalWrite(MS2_PIN, HIGH);
+      digitalWrite(MS3_PIN, HIGH);
+      STEP_MULTIPLIER = 1;
+      break;
+  }
+}
+
+void stop_retract() {   //stop the motor and retract the stage far enough that the limit switch opens
+  if (LIM_0) DIR = 1;
+  if (LIM_1) DIR = 0;
+
+  while (LIM_0 || LIM_1) {
+    do_1step();
+    LIM_0 = digitalRead(LIM_0_PIN);
+    LIM_1 = digitalRead(LIM_1_PIN);
+  }
+    
+  do_numsteps(50); //debounce switch
+  
+}
+
+void do_1step() {     //send a single pulse to the stepper motor
+  digitalWrite(SLP_PIN, HIGH);
+  digitalWrite(DIR_PIN, DIR);
+  digitalWrite(STEP_PIN, HIGH);
+  delayMicroseconds(PULSE_LENGTH);
+  digitalWrite(STEP_PIN, LOW);
+  delayMicroseconds(PULSE_GAP);
+  digitalWrite(SLP_PIN, LOW);
+  
+  if (DIR) STAGE_POSITION = STAGE_POSITION - STEP_MULTIPLIER;
+  else STAGE_POSITION = STAGE_POSITION + STEP_MULTIPLIER;
+    
+}
+
+void do_numsteps(int num_steps) {	//subroutine to move a set number of steps
+  digitalWrite(DIR_PIN, DIR);
+  int i;
+  for (i = 0; i < num_steps; i++) {
+    do_1step();
+  }
+
+}
+
+void button_check() {		//check button states for input
+
+  LIM_0 = digitalRead(LIM_0_PIN);
+  LIM_1 = digitalRead(LIM_1_PIN);
+  if (LIM_0 || LIM_1) stop_retract();
+
+  FR_ST = digitalRead(FR_ST_PIN);
+
+  MOVE_0 = digitalRead(MOVE_1_PIN);
+  MOVE_1 = digitalRead(MOVE_0_PIN);
+
+
+  if (MOVE_0 && !MOVE_1) {
+    DIR = 1;
+    do_1step();
+    if (FR_ST) delay(SINGLE_STEP_DELAY);
+  }
+
+  if (MOVE_1 && !MOVE_0) {
+    DIR = 0;
+    do_1step();
+    if (FR_ST) delay(SINGLE_STEP_DELAY);
+  }
+
+  if (MOVE_1 && MOVE_0) {
+    STAGE_POSITION = 0;
+    delay(200);
+  }
+
+  if
+  (digitalRead(CO_FI_PIN) != CO_FI) {
+    CO_FI = digitalRead(CO_FI_PIN);
+    coarse_fine();
+  }
+  
+  
+}
+
+void serial_check() {		//check whether serial characters are available
+  if (Serial.available() > 0) {    // is a character available?
+    RX_BYTE = Serial.read();       // get the character
+
+    if (RX_BYTE != 'E') {
+      // a character of the string was received
+      RX_STR += RX_BYTE;
+    } else {
+      // end of string
+
+      Serial.print("STRING IS: ");
+      Serial.println(RX_STR);
+
+
+
+      SERIAL_DIST = RX_STR.substring(1, 9);
+      Serial.print("DISTANCE IS: ");
+      Serial.println(SERIAL_DIST.toInt());
+      SERIAL_DIST_INT = SERIAL_DIST.toInt();
+      SERIAL_DIST = "";
+
+      SERIAL_OPS = RX_STR.substring(9, 13);
+      Serial.print("# OF OPERATIONS IS: ");
+      Serial.println(SERIAL_OPS.toInt());
+      SERIAL_OPS_INT = SERIAL_OPS.toInt();
+      SERIAL_OPS = "";
+
+      SERIAL_DIR = RX_STR.substring(0, 1);
+      Serial.print("DIR IS: ");
+      Serial.println(SERIAL_DIR);
+      SERIAL_DIR_INT = SERIAL_DIR.toInt();
+      SERIAL_DIR = "";
+
+      RX_STR = "";                // clear the string for reuse
+      Serial.println("");
+      Serial.println("ENTER STRING FOLLOWED BY 'E' TERMINATOR");
+      //   digitalWrite(DIR_PIN, SERIAL_DIR_INT);
+
+      int i;
+      int j;
+      for (j = 0; j < SERIAL_OPS_INT; j++) {
+        delay(1000);
+        Serial.print("OPERATION #");
+        Serial.println(j);
+        for (i = 0; i < SERIAL_DIST_INT; i++) {
+          DIR = SERIAL_DIR_INT;
+          do_1step();
+        }
+        
+        //Example serial codes@
+        //{dir}{ steps  }{operations}{terminator}
+        // {0} {00000100}    {001}       {E}
+        
+        //16 steps
+        //000000016001E
+        
+        //100 steps
+        //000000100001E
+      }
+
+    }
+
+  } // end: if (Serial.available() > 0)
+}
+
+void loop() {		//main loop
+  button_check();
+  serial_check();
+  
+  CurrentTime = millis();
+  ElapsedTime = CurrentTime - StartTime;
+
+  if (ElapsedTime > 1000) {
+    Serial.println(STAGE_POSITION/16);
+    StartTime = millis();
+  }
+  
+} 
