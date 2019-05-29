@@ -48,6 +48,7 @@ int SERIAL_OPS_INT;
 char RX_BYTE = 0;
 String RX_STR = "";
 
+unsigned long SleepTime = millis();
 unsigned long StartTime = millis();          //timekeeping for serial write every second
 unsigned long CurrentTime = millis();
 unsigned long ElapsedTime = CurrentTime - StartTime;
@@ -55,7 +56,7 @@ unsigned long ElapsedTime = CurrentTime - StartTime;
 void setup() {
 
   pinMode(SLP_PIN, OUTPUT);   //sleep pin high to disable sleep mode
-  digitalWrite(SLP_PIN, LOW);
+  digitalWrite(SLP_PIN, HIGH);
 
   pinMode(EN_PIN, OUTPUT);    //enable stepper driver
   digitalWrite(EN_PIN, LOW);
@@ -121,20 +122,20 @@ void stop_retract() {   //stop the motor and retract the stage far enough that t
 }
 
 void do_1step() {     //send a single pulse to the stepper motor
-  digitalWrite(SLP_PIN, HIGH);
+  //digitalWrite(SLP_PIN, HIGH);
   digitalWrite(DIR_PIN, DIR);
   digitalWrite(STEP_PIN, HIGH);
   delayMicroseconds(PULSE_LENGTH);
   digitalWrite(STEP_PIN, LOW);
   delayMicroseconds(PULSE_GAP);
-  digitalWrite(SLP_PIN, LOW);
-  
+  //digitalWrite(SLP_PIN, LOW);
+  SleepTime = millis(); 
   if (DIR) STAGE_POSITION = STAGE_POSITION - STEP_MULTIPLIER;
   else STAGE_POSITION = STAGE_POSITION + STEP_MULTIPLIER;
     
 }
 
-void do_numsteps(int num_steps) {	//subroutine to move a set number of steps
+void do_numsteps(int num_steps) {  //subroutine to move a set number of steps
   digitalWrite(DIR_PIN, DIR);
   int i;
   for (i = 0; i < num_steps; i++) {
@@ -143,7 +144,7 @@ void do_numsteps(int num_steps) {	//subroutine to move a set number of steps
 
 }
 
-void button_check() {		//check button states for input
+void button_check() {   //check button states for input
 
   LIM_0 = digitalRead(LIM_0_PIN);
   LIM_1 = digitalRead(LIM_1_PIN);
@@ -181,7 +182,7 @@ void button_check() {		//check button states for input
   
 }
 
-void serial_check() {		//check whether serial characters are available
+void serial_check() {   //check whether serial characters are available
   if (Serial.available() > 0) {    // is a character available?
     RX_BYTE = Serial.read();       // get the character
 
@@ -246,8 +247,10 @@ void serial_check() {		//check whether serial characters are available
   } // end: if (Serial.available() > 0)
 }
 
-void loop() {		//main loop
+void loop() {   //main loop
+  
   button_check();
+  
   serial_check();
   
   CurrentTime = millis();
@@ -256,6 +259,15 @@ void loop() {		//main loop
   if (ElapsedTime > 1000) {
     Serial.println(STAGE_POSITION/16);
     StartTime = millis();
-  }
   
+  }
+
+  CurrentTime = millis();
+  ElapsedTime = CurrentTime - SleepTime;
+  if (ElapsedTime > 1000) {
+  digitalWrite(SLP_PIN, LOW);
+  }
+  else {
+  digitalWrite(SLP_PIN, HIGH);
+  }
 } 
